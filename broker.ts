@@ -2,14 +2,22 @@
 /**
  * claude-peers broker daemon
  *
- * A singleton HTTP server on localhost:7899 backed by SQLite.
+ * A singleton HTTP server backed by SQLite.
  * Tracks all registered Claude Code peers and routes messages between them.
+ * Supports LAN networking — binds to 0.0.0.0 so peers on other machines can connect.
  *
  * Auto-launched by the MCP server if not already running.
  * Run directly: bun broker.ts
+ *
+ * Environment variables:
+ *   CLAUDE_PEERS_PORT    — Port to listen on (default: 7899)
+ *   CLAUDE_PEERS_DB      — SQLite database path (default: ~/.claude-peers.db)
+ *   CLAUDE_PEERS_SECRET  — Shared secret for LAN authentication (optional, recommended)
+ *   CLAUDE_PEERS_BIND    — Bind address: "lan" (0.0.0.0) or "local" (127.0.0.1, default)
  */
 
 import { Database } from "bun:sqlite";
+import os from "os";
 import type {
   RegisterRequest,
   RegisterResponse,
@@ -24,7 +32,13 @@ import type {
 } from "./shared/types.ts";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
-const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peers.db`;
+const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME ?? process.env.USERPROFILE}/.claude-peers.db`;
+const SHARED_SECRET = process.env.CLAUDE_PEERS_SECRET ?? null;
+const BIND_MODE = process.env.CLAUDE_PEERS_BIND ?? "local";
+const BIND_HOST = BIND_MODE === "lan" ? "0.0.0.0" : "127.0.0.1";
+
+// Peers not seen for this long are considered stale
+const STALE_TIMEOUT_MS = 60_000; // 60 seconds
 
 // --- Database setup ---
 
@@ -36,6 +50,7 @@ db.run(`
   CREATE TABLE IF NOT EXISTS peers (
     id TEXT PRIMARY KEY,
     pid INTEGER NOT NULL,
+    hostname TEXT NOT NULL DEFAULT '',
     cwd TEXT NOT NULL,
     git_root TEXT,
     tty TEXT,
@@ -44,6 +59,13 @@ db.run(`
     last_seen TEXT NOT NULL
   )
 `);
+
+// Migration: add hostname column if missing (for existing DBs)
+try {
+  db.run("ALTER TABLE peers ADD COLUMN hostname TEXT NOT NULL DEFAULT ''");
+} catch {
+  // Column already exists
+}
 
 db.run(`
   CREATE TABLE IF NOT EXISTS messages (
@@ -58,18 +80,16 @@ db.run(`
   )
 `);
 
-// Clean up stale peers (PIDs that no longer exist) on startup
+// Clean up stale peers based on last_seen timestamp (works across LAN, unlike PID checks)
 function cleanStalePeers() {
-  const peers = db.query("SELECT id, pid FROM peers").all() as { id: string; pid: number }[];
-  for (const peer of peers) {
-    try {
-      // Check if process is still alive (signal 0 doesn't kill, just checks)
-      process.kill(peer.pid, 0);
-    } catch {
-      // Process doesn't exist, remove it
-      db.run("DELETE FROM peers WHERE id = ?", [peer.id]);
-      db.run("DELETE FROM messages WHERE to_id = ? AND delivered = 0", [peer.id]);
-    }
+  const cutoff = new Date(Date.now() - STALE_TIMEOUT_MS).toISOString();
+  const stale = db.query("SELECT id FROM peers WHERE last_seen < ?").all(cutoff) as { id: string }[];
+  for (const peer of stale) {
+    db.run("DELETE FROM peers WHERE id = ?", [peer.id]);
+    db.run("DELETE FROM messages WHERE to_id = ? AND delivered = 0", [peer.id]);
+  }
+  if (stale.length > 0) {
+    console.error(`[broker] Cleaned ${stale.length} stale peer(s)`);
   }
 }
 
@@ -78,11 +98,19 @@ cleanStalePeers();
 // Periodically clean stale peers (every 30s)
 setInterval(cleanStalePeers, 30_000);
 
+// --- Authentication ---
+
+function authenticate(req: Request): boolean {
+  if (!SHARED_SECRET) return true; // No secret = no auth required
+  const token = req.headers.get("x-claude-peers-secret");
+  return token === SHARED_SECRET;
+}
+
 // --- Prepared statements ---
 
 const insertPeer = db.prepare(`
-  INSERT INTO peers (id, pid, cwd, git_root, tty, summary, registered_at, last_seen)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO peers (id, pid, hostname, cwd, git_root, tty, summary, registered_at, last_seen)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateLastSeen = db.prepare(`
@@ -99,6 +127,10 @@ const deletePeer = db.prepare(`
 
 const selectAllPeers = db.prepare(`
   SELECT * FROM peers
+`);
+
+const selectPeersByHostname = db.prepare(`
+  SELECT * FROM peers WHERE hostname = ?
 `);
 
 const selectPeersByDirectory = db.prepare(`
@@ -138,14 +170,15 @@ function generateId(): string {
 function handleRegister(body: RegisterRequest): RegisterResponse {
   const id = generateId();
   const now = new Date().toISOString();
+  const hostname = body.hostname || os.hostname();
 
-  // Remove any existing registration for this PID (re-registration)
-  const existing = db.query("SELECT id FROM peers WHERE pid = ?").get(body.pid) as { id: string } | null;
+  // Remove any existing registration for this PID + hostname combo (re-registration)
+  const existing = db.query("SELECT id FROM peers WHERE pid = ? AND hostname = ?").get(body.pid, hostname) as { id: string } | null;
   if (existing) {
     deletePeer.run(existing.id);
   }
 
-  insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, body.summary, now, now);
+  insertPeer.run(id, body.pid, hostname, body.cwd, body.git_root, body.tty, body.summary, now, now);
   return { id };
 }
 
@@ -161,8 +194,16 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
   let peers: Peer[];
 
   switch (body.scope) {
-    case "machine":
+    case "network":
+      // All peers across all machines
       peers = selectAllPeers.all() as Peer[];
+      break;
+    case "machine":
+      if (body.hostname) {
+        peers = selectPeersByHostname.all(body.hostname) as Peer[];
+      } else {
+        peers = selectAllPeers.all() as Peer[];
+      }
       break;
     case "directory":
       peers = selectPeersByDirectory.all(body.cwd) as Peer[];
@@ -184,17 +225,9 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
     peers = peers.filter((p) => p.id !== body.exclude_id);
   }
 
-  // Verify each peer's process is still alive
-  return peers.filter((p) => {
-    try {
-      process.kill(p.pid, 0);
-      return true;
-    } catch {
-      // Clean up dead peer
-      deletePeer.run(p.id);
-      return false;
-    }
-  });
+  // Filter out stale peers (last_seen older than timeout)
+  const cutoff = new Date(Date.now() - STALE_TIMEOUT_MS).toISOString();
+  return peers.filter((p) => p.last_seen >= cutoff);
 }
 
 function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: string } {
@@ -225,18 +258,42 @@ function handleUnregister(body: { id: string }): void {
 
 // --- HTTP Server ---
 
+const localIP = (() => {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] ?? []) {
+      if (net.family === "IPv4" && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return "unknown";
+})();
+
 Bun.serve({
   port: PORT,
-  hostname: "127.0.0.1",
+  hostname: BIND_HOST,
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
 
     if (req.method !== "POST") {
       if (path === "/health") {
-        return Response.json({ status: "ok", peers: (selectAllPeers.all() as Peer[]).length });
+        return Response.json({
+          status: "ok",
+          hostname: os.hostname(),
+          lan_ip: localIP,
+          bind: BIND_HOST,
+          auth: SHARED_SECRET ? "enabled" : "disabled",
+          peers: (selectAllPeers.all() as Peer[]).length,
+        });
       }
-      return new Response("claude-peers broker", { status: 200 });
+      return new Response("claude-peers broker (LAN-enabled)", { status: 200 });
+    }
+
+    // Authenticate all POST requests
+    if (!authenticate(req)) {
+      return Response.json({ error: "unauthorized" }, { status: 401 });
     }
 
     try {
@@ -270,4 +327,6 @@ Bun.serve({
   },
 });
 
-console.error(`[claude-peers broker] listening on 127.0.0.1:${PORT} (db: ${DB_PATH})`);
+console.error(`[claude-peers broker] listening on ${BIND_HOST}:${PORT} (db: ${DB_PATH})`);
+console.error(`[claude-peers broker] hostname: ${os.hostname()}, LAN IP: ${localIP}`);
+console.error(`[claude-peers broker] auth: ${SHARED_SECRET ? "enabled" : "disabled"}`);
