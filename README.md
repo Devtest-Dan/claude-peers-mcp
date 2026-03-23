@@ -356,6 +356,65 @@ There's no "share with team" button. The workspace tools are the sharing mechani
 
 Everything is broadcast by default. The only tools that target a specific peer are `send_message` and `delegate_task`.
 
+## Single User, Multiple Sessions
+
+You don't need a team to benefit from claude-peers. A single developer running multiple Claude sessions on the same machine gets the same coordination tools.
+
+```
+  Terminal 1                   Terminal 2                   Terminal 3
+  ┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
+  │ claude-peers         │     │ claude-peers         │     │ claude-peers         │
+  │ D:\trade-agent       │ ◄─► │ D:\trade-agent       │ ◄─► │ D:\TradeQuest        │
+  │ "refactoring SMC"    │     │ "writing tests"      │     │ "building quiz UI"   │
+  │ peer: abc123         │     │ peer: def456         │     │ peer: ghi789         │
+  └──────────┬──────────┘     └──────────┬──────────┘     └──────────┬──────────┘
+             │                           │                           │
+             └──────────── broker (localhost:7899) ──────────────────┘
+```
+
+### Peer Scoping
+
+Use scopes to find exactly the sessions you're looking for:
+
+| Scope | What it returns |
+|---|---|
+| `list_peers(scope: "network")` | All sessions everywhere (local + LAN) |
+| `list_peers(scope: "machine")` | All sessions on your machine |
+| `list_peers(scope: "repo")` | Only sessions in the same git repo |
+| `list_peers(scope: "directory")` | Only sessions in the exact same directory |
+
+### Use Cases for Multiple Local Sessions
+
+**Parallel workstreams on the same project:**
+- Session A refactors the backend — locks `src/api/`
+- Session B writes tests — sees the lock, works on `tests/` instead
+- Session A finishes → unlocks → Session B gets notified
+
+**Cross-project coordination:**
+- Session on `trade-agent` shares context about the indicator API
+- Session on `TradeQuest` reads that context to integrate the same indicators
+
+**Delegation without context-switching:**
+- You're deep in a complex refactor in Session A
+- Delegate "run the test suite" to Session B
+- Session B runs tests and reports back — you never lose focus
+
+### Local + LAN Together
+
+Local sessions and LAN sessions all connect to the same broker. There's no difference in how they work — a message from a peer on your machine arrives the same way as one from across the network.
+
+```
+  Your Machine                                 Teammate's Machine
+  ┌────────────────────────────────┐          ┌─────────────────────┐
+  │ Session A (trade-agent)        │          │ Session D            │
+  │ Session B (trade-agent)        │  ◄────►  │ (trade-agent)        │
+  │ Session C (TradeQuest)         │          │                      │
+  └────────────────┬───────────────┘          └──────────┬──────────┘
+                   │                                     │
+                   └───── broker (your machine:7899) ────┘
+                         5 peers, 1 broker
+```
+
 ## What This Is NOT
 
 - **Not a shared Claude session** — each person has their own private conversation with Claude
