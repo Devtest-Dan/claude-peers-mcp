@@ -296,6 +296,66 @@ With claude-peers:
   You: create_task("Fix RSI Kernel edge case")     → teammate's Claude claims it
 ```
 
+## How Multi-Project Teams Work
+
+The broker is a single shared workspace across **all projects**. Each team member works on their own project, and everything they share is automatically scoped by project name (derived from the repo folder).
+
+```
+  Daniel (trade-agent)       Sammy (TradeQuest)        Nili (ReviewChain)
+  ┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐
+  │ share_context       │    │ share_context       │    │ share_context       │
+  │ create_task         │    │ create_task         │    │ create_task         │
+  │ lock_files          │    │ lock_files          │    │ lock_files          │
+  └────────┬───────────┘    └────────┬───────────┘    └────────┬───────────┘
+           │                         │                         │
+           └─────────── shared broker (one for all) ───────────┘
+                                     │
+                    ┌────────────────┴────────────────┐
+                    │  tasks:                         │
+                    │    #1 [trade-agent] Fix RSI      │
+                    │    #2 [TradeQuest] Add quiz UI   │
+                    │    #3 [ReviewChain] Auth flow    │
+                    │                                  │
+                    │  context:                        │
+                    │    trade-agent/architecture      │
+                    │    TradeQuest/conventions        │
+                    │    ReviewChain/gotchas           │
+                    └─────────────────────────────────┘
+```
+
+### Dropping into Someone Else's Project
+
+A teammate doesn't need a special invitation. They just ask:
+
+```
+Teammate:  "What context has been shared on trade-agent?"
+           → get_context(project: "trade-agent")
+           → Gets architecture notes, gotchas, current status
+
+Teammate:  "What tasks are open on trade-agent?"
+           → list_tasks(project: "trade-agent", status: "open")
+           → Sees what needs doing, claims a task
+
+Teammate:  "What files is anyone editing on trade-agent?"
+           → list_locks(project: "trade-agent")
+           → Knows what to avoid
+```
+
+The project owner doesn't need to "invite" anyone or do anything special. They just work normally — sharing context and creating tasks as they go. That information sits in the broker, and any connected peer can query it by project name.
+
+### No Extra Steps for Sharing
+
+There's no "share with team" button. The workspace tools are the sharing mechanism:
+
+| What the project owner does naturally | What teammates see |
+|---|---|
+| `share_context("architecture", "FastAPI + React")` | `get_context("trade-agent")` returns it |
+| `create_task("Fix memory leak")` | `list_tasks("trade-agent")` shows it |
+| `lock_files(["src/api.py"])` | `list_locks("trade-agent")` shows the lock |
+| Works in `D:\trade-agent` directory | `list_peers` shows them working on trade-agent |
+
+Everything is broadcast by default. The only tools that target a specific peer are `send_message` and `delegate_task`.
+
 ## What This Is NOT
 
 - **Not a shared Claude session** — each person has their own private conversation with Claude
