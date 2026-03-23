@@ -1,141 +1,168 @@
----
-description: Use Bun instead of Node.js, npm, pnpm, or vite.
-globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
-alwaysApply: false
----
+# claude-peers — Shared Workspace for Claude Code Instances
 
-# claude-peers
+## What This Is
 
-Peer discovery and messaging MCP channel for Claude Code instances.
+A shared workspace that lets multiple Claude Code instances coordinate across machines via a central broker. Provides 17 MCP tools: peer discovery, messaging, shared task board, context store, file locks, and task delegation.
 
-## Architecture
+## Installation Instructions for Claude
 
-- `broker.ts` — Singleton HTTP daemon on localhost:7899 + SQLite. Auto-launched by the MCP server.
-- `server.ts` — MCP stdio server, one per Claude Code instance. Connects to broker, exposes tools, pushes channel notifications.
-- `shared/types.ts` — Shared TypeScript types for broker API.
-- `shared/summarize.ts` — Auto-summary generation via gpt-5.4-nano.
-- `cli.ts` — CLI utility for inspecting broker state.
+When a user asks you to "install claude-peers", "set up claude-peers", or gives you this repo link, follow these steps exactly on their machine.
 
-## Running
+### Prerequisites Check
+
+Run these first to verify what's available:
+```bash
+which bun 2>/dev/null && bun --version || echo "NEED_BUN"
+which claude 2>/dev/null && claude --version || echo "NEED_CLAUDE"
+which git 2>/dev/null || echo "NEED_GIT"
+```
+
+### Automated Setup (Preferred)
+
+**On Windows (cmd or PowerShell):**
+```cmd
+git clone https://github.com/Devtest-Dan/claude-peers-mcp.git %USERPROFILE%\claude-peers-mcp && %USERPROFILE%\claude-peers-mcp\join.bat
+```
+
+**On Mac/Linux/Git Bash:**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/Devtest-Dan/claude-peers-mcp/main/join.sh)
+```
+
+The script handles everything: installs bun, clones repo, installs deps, registers MCP server, sets env vars, creates the `claude-peers` launch command, and tests the broker connection.
+
+### Manual Setup (If Scripts Fail)
+
+If the automated scripts don't work on the user's system, do these steps manually:
+
+**Step 1 — Install Bun:**
+```bash
+npm install -g bun
+```
+
+**Step 2 — Clone and install:**
+```bash
+git clone https://github.com/Devtest-Dan/claude-peers-mcp.git ~/claude-peers-mcp
+cd ~/claude-peers-mcp && bun install
+```
+Windows path: `%USERPROFILE%\claude-peers-mcp`
+
+**Step 3 — Register MCP server with Claude Code:**
+```bash
+claude mcp remove --scope user claude-peers 2>/dev/null || true
+claude mcp add --scope user --transport stdio claude-peers -- bun ~/claude-peers-mcp/server.ts
+```
+Windows: use full path `bun %USERPROFILE%\claude-peers-mcp\server.ts`
+
+**Step 4 — Set environment variables:**
+
+The user needs to know the broker host IP. Ask them: "What's the broker host IP address?"
+
+Mac/Linux — add to `~/.bashrc` or `~/.zshrc`:
+```bash
+export CLAUDE_PEERS_HOST=<BROKER_IP>
+export CLAUDE_PEERS_PORT=7899
+alias claude-peers="claude --dangerously-skip-permissions --dangerously-load-development-channels server:claude-peers"
+```
+
+Windows — set permanently and create launcher:
+```cmd
+setx CLAUDE_PEERS_HOST "<BROKER_IP>"
+setx CLAUDE_PEERS_PORT "7899"
+```
+Then create `%USERPROFILE%\AppData\Local\Microsoft\WindowsApps\claude-peers.cmd`:
+```cmd
+@echo off
+set "CLAUDE_PEERS_HOST=<BROKER_IP>"
+set "CLAUDE_PEERS_PORT=<BROKER_PORT>"
+claude --dangerously-skip-permissions --dangerously-load-development-channels server:claude-peers %*
+```
+
+**Step 5 — Verify:**
+```bash
+curl -s http://<BROKER_IP>:7899/health
+```
+Should return JSON with `"status":"ok"`.
+
+**Step 6 — Tell the user:** "Open a new terminal and type `claude-peers` to connect."
+
+### Broker Host Setup
+
+If the user wants to HOST the broker (not just join):
 
 ```bash
-# Start Claude Code with the channel:
-claude --dangerously-load-development-channels server:claude-peers
+# Start broker in LAN mode (accessible from other machines)
+CLAUDE_PEERS_BIND=lan bun ~/claude-peers-mcp/broker.ts
 
-# Or just add to .mcp.json and use as regular MCP (no channel push, but tools work):
-# { "claude-peers": { "command": "bun", "args": ["./server.ts"] } }
-
-# CLI:
-bun cli.ts status
-bun cli.ts peers
-bun cli.ts send <peer-id> <message>
-bun cli.ts kill-broker
+# Windows auto-start service (runs on logon, hidden window):
+# Run install-service.bat from the repo directory
 ```
 
-## Bun
+The broker's LAN IP is shown in the startup output. Share this IP with team members.
 
-Default to using Bun instead of Node.js.
+## Project Structure
 
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun test` instead of `jest` or `vitest`
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Use `bunx <package> <command>` instead of `npx <package> <command>`
-- Bun automatically loads .env, so don't use dotenv.
-
-## APIs
-
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
-- `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile
-- Bun.$`ls` instead of execa.
-
-## Testing
-
-Use `bun test` to run tests.
-
-```ts#index.test.ts
-import { test, expect } from "bun:test";
-
-test("hello world", () => {
-  expect(1).toBe(1);
-});
+```
+broker.ts              Central broker daemon (HTTP + SQLite, one per network)
+server.ts              MCP server (one per Claude Code session, connects to broker)
+cli.ts                 CLI for inspecting workspace state
+shared/types.ts        TypeScript interfaces for all API types
+shared/summarize.ts    Auto-summary generation for peer context
+join.sh / join.bat     One-command team setup scripts
+setup.sh / setup.bat   Interactive setup with prompts
+install-service.bat    Windows auto-start service installer
+broker-launcher.vbs    Hidden-window launcher for the broker
 ```
 
-## Frontend
+## Key Environment Variables
 
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CLAUDE_PEERS_HOST` | `127.0.0.1` | Broker IP (set to broker machine's IP for remote) |
+| `CLAUDE_PEERS_PORT` | `7899` | Broker port |
+| `CLAUDE_PEERS_BIND` | `local` | Broker bind: `local` (127.0.0.1) or `lan` (0.0.0.0) |
+| `CLAUDE_PEERS_SECRET` | — | Shared secret for authentication (optional) |
+| `OPENAI_API_KEY` | — | Auto-summary via gpt-5.4-nano (optional) |
 
-Server:
+## Runtime: Bun (Not Node.js)
 
-```ts#index.ts
-import index from "./index.html"
+This project uses Bun exclusively. Key differences:
 
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
+- `bun <file>` instead of `node <file>`
+- `bun install` instead of `npm install`
+- `bun test` instead of `jest`
+- `bun:sqlite` for SQLite (not `better-sqlite3`)
+- `Bun.serve()` for HTTP (not `express`)
+- Bun auto-loads `.env` files (no dotenv needed)
+
+## MCP Tools (17 Total)
+
+**Peers:** list_peers, send_message, set_summary, check_messages
+**Tasks:** create_task, list_tasks, claim_task, complete_task, update_task
+**Context:** share_context, get_context, delete_context
+**Locks:** lock_files, unlock_files, list_locks
+**Delegation:** delegate_task, respond_delegation, list_delegations
+
+## CLI Commands
+
+```bash
+bun cli.ts status              # broker overview
+bun cli.ts peers               # list connected peers
+bun cli.ts tasks [project]     # shared tasks
+bun cli.ts context [project]   # shared context
+bun cli.ts locks [project]     # file locks
+bun cli.ts delegations         # delegations
+bun cli.ts send <id> <msg>     # message a peer
+bun cli.ts kill-broker         # stop broker
 ```
 
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
+## Troubleshooting
 
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
-
-With the following `frontend.tsx`:
-
-```tsx#frontend.tsx
-import React from "react";
-import { createRoot } from "react-dom/client";
-
-// import .css files directly and it works
-import './index.css';
-
-const root = createRoot(document.body);
-
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+| Problem | Fix |
+|---------|-----|
+| `bun: command not found` | `npm install -g bun` |
+| `claude: command not found` | Install Claude Code CLI |
+| Broker not reachable | Check broker is running, check IP/port, check firewall |
+| MCP server not connecting | Re-run `claude mcp add` step, restart Claude Code |
+| Stale peers showing | They auto-clean after 60s, or restart broker |
+| File locks stuck | They auto-release when the peer disconnects |
