@@ -123,47 +123,104 @@ This creates a scheduled task that starts the broker on logon with no visible wi
 
 ## Usage Examples
 
-### Coordinating Work
-```
-You:       "Create a task to fix the RSI indicator edge case, high priority"
-           → Claude calls create_task(title="Fix RSI indicator edge case", priority="high")
+### Scenario 1: Team Sprint on a Project
 
-Teammate:  "What tasks are open on trade-agent?"
-           → Claude calls list_tasks(project="trade-agent")
-           → "I'll take the RSI fix"
-           → Claude calls claim_task(task_id=1)
+Two developers, Daniel and a teammate, both working on `trade-agent` from different machines.
+
+```
+  Daniel's Machine                              Teammate's Machine
+  ┌──────────────────────────┐                 ┌──────────────────────────┐
+  │ claude-peers              │                 │ claude-peers              │
+  │ D:\trade-agent            │                 │ ~/trade-agent             │
+  │                           │                 │                           │
+  │ 1. share_context          │ ───context───►  │ 4. get_context            │
+  │    "architecture"         │                 │    → reads all decisions  │
+  │    "FastAPI + MQL5 EA"    │                 │                           │
+  │                           │                 │                           │
+  │ 2. create_task            │ ───task──────►  │ 5. list_tasks             │
+  │    "Fix RSI edge case"    │                 │    → sees open tasks      │
+  │    priority: high         │                 │                           │
+  │                           │                 │ 6. claim_task(#1)         │
+  │ 3. lock_files             │ ───notify────►  │    → takes RSI task       │
+  │    "src/indicators/smc.py"│                 │                           │
+  │    "refactoring SMC"      │                 │ 7. list_locks             │
+  │                           │                 │    → avoids smc.py        │
+  │                           │  ◄──notify────  │                           │
+  │ 8. gets notification:     │                 │ 8. complete_task(#1)      │
+  │    "Task #1 completed"    │                 │    "Fixed edge case in    │
+  │                           │                 │     kernel smoothing"     │
+  └──────────────────────────┘                 └──────────────────────────┘
+               │                                           │
+               └────────── broker (Daniel:7899) ───────────┘
 ```
 
-### Sharing Knowledge
-```
-You:       "Share that the SMC indicator uses merged OB+FVG approach"
-           → Claude calls share_context(key="smc-architecture", value="v2.14 uses merged OB+FVG...")
+### Scenario 2: Delegating Work Across Sessions
 
-Teammate:  "What do I need to know about this project?"
-           → Claude calls get_context(project="trade-agent")
-           → Gets all shared knowledge entries
+You're deep in one task and need another Claude to handle something without context-switching.
+
+```
+  Your Session (trade-agent)                    Teammate's Session (trade-agent)
+  ┌──────────────────────────┐                 ┌──────────────────────────┐
+  │                           │                 │                           │
+  │ "Ask peer abc to run the  │                 │                           │
+  │  test suite and report"   │                 │                           │
+  │                           │                 │                           │
+  │ delegate_task ─────────────────────────────► [delegation notification]  │
+  │   to: "abc"               │                 │                           │
+  │   task: "run tests"       │                 │ Claude reads delegation,  │
+  │   context: "focus on      │                 │ runs tests, responds:     │
+  │    indicator tests"       │                 │                           │
+  │                           │  ◄──────────────── respond_delegation      │
+  │ [notification arrives]    │                 │   status: "completed"     │
+  │ "14/14 tests passing,     │                 │   result: "14/14 pass,   │
+  │  all indicators green"    │                 │    all indicators green"  │
+  │                           │                 │                           │
+  │ Continues work without    │                 │                           │
+  │ ever switching context    │                 │                           │
+  └──────────────────────────┘                 └──────────────────────────┘
 ```
 
-### Preventing Conflicts
-```
-You:       "I'm going to edit the MACD indicator"
-           → Claude calls lock_files(["src/indicators/macd_4c.py"], reason="refactoring divergence")
-           → All peers receive a notification about the lock
+### Scenario 3: New Team Member Joins
 
-Teammate:  "What files are locked?"
-           → Claude calls list_locks(project="trade-agent")
-           → Knows to avoid macd_4c.py
+A new person joins the project mid-sprint and gets up to speed instantly.
+
+```
+  Existing peer (working)              New peer (just joined)
+  ┌─────────────────────┐             ┌─────────────────────────────┐
+  │                      │             │                              │
+  │ (already shared):    │             │ 1. get_context("trade-agent")│
+  │  architecture        │ ──────────► │    → "FastAPI + MQL5 + React"│
+  │  current-status      │             │    → "SMC v2.14 merged OB+FVG│
+  │  gotchas             │             │    → "Don't touch ZeroMQ     │
+  │  conventions         │             │       bridge during market   │
+  │                      │             │       hours"                 │
+  │                      │             │                              │
+  │ (tasks board):       │             │ 2. list_tasks                │
+  │  #1 Fix RSI [claimed]│ ──────────► │    → sees #1 claimed by Dan │
+  │  #2 Dashboard [open] │             │    → #2 is open, claims it  │
+  │                      │             │                              │
+  │ (file locks):        │             │ 3. list_locks                │
+  │  smc.py [locked]     │ ──────────► │    → knows to avoid smc.py  │
+  │                      │             │                              │
+  │                      │             │ Ready to contribute in       │
+  │                      │             │ under 60 seconds             │
+  └─────────────────────┘             └─────────────────────────────┘
 ```
 
-### Delegating Work
-```
-You:       "Ask peer xyz to run the test suite and report results"
-           → Claude calls delegate_task(to_id="xyz", task="Run test suite", context="Focus on indicator tests")
+### Natural Language — No Commands to Learn
 
-Teammate:  → Receives delegation notification
-           → Claude calls respond_delegation(delegation_id=1, status="completed", result="14/14 tests passing")
-           → You get notified with the result
-```
+You don't need to memorize tool names. Just talk to Claude naturally:
+
+| You say | Claude does |
+|---------|------------|
+| "What tasks are open?" | `list_tasks()` |
+| "I'll work on the dashboard" | `claim_task()` + `lock_files()` |
+| "Who else is online?" | `list_peers(scope: "network")` |
+| "Tell peer xyz to run the tests" | `delegate_task(to_id: "xyz", ...)` |
+| "Share that we're using PostgreSQL 16" | `share_context(key: "database", ...)` |
+| "What do I need to know about this project?" | `get_context()` |
+| "I'm done with the auth module" | `complete_task()` + `unlock_files()` |
+| "What files is anyone editing?" | `list_locks()` |
 
 ## CLI
 
@@ -211,6 +268,33 @@ Set `CLAUDE_PEERS_SECRET` on the broker and all peers to enable shared-secret au
 - [Bun](https://bun.sh) runtime
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
 - Network access to the broker (same LAN, Tailscale mesh, etc.)
+
+## How This Compares to Git
+
+Git handles **code**. claude-peers handles **real-time coordination between Claude sessions**. They work together:
+
+| Concern | Git + GitHub | claude-peers |
+|---------|-------------|-------------|
+| Sharing code | Repos, clones, branches | Not involved — you still use Git |
+| Avoiding file conflicts | Merge after the fact | **Prevent** with real-time file locks |
+| Who's doing what | PR descriptions, Slack, standups | Live — `list_peers`, `list_tasks` |
+| Task assignment | GitHub Issues | `create_task`, `delegate_task` (instant) |
+| Project knowledge | README, wiki, CLAUDE.md | `share_context` — live, queryable by any Claude |
+| Code review | PR review workflow | `send_message` for instant questions |
+| Isolation | Worktrees / branches | Each person's own machine + branch |
+
+**The key difference:** Git is asynchronous (commit, push, PR, review, merge). claude-peers is synchronous — your Claude and your teammate's Claude are aware of each other **right now**, can see what files each is editing, what tasks are open, and what decisions have been made, all in real time.
+
+```
+Without claude-peers:
+  You and a teammate both edit src/indicators/smc.py → merge conflict → wasted time
+  No way to know what the other person's Claude is doing
+
+With claude-peers:
+  You: lock_files(["src/indicators/smc.py"])       → teammate's Claude sees the lock
+  You: share_context("SMC v2.14 uses merged OB+FVG") → teammate's Claude reads it
+  You: create_task("Fix RSI Kernel edge case")     → teammate's Claude claims it
+```
 
 ## What This Is NOT
 
